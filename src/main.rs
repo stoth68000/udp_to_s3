@@ -9,11 +9,26 @@ use aws_sdk_s3::{Client, Config};
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3;
 use aws_sdk_s3::config::{Region, Credentials};
+use clap::Parser;
+use std::net::IpAddr;
 
 const SEGMENT_SIZE: usize = 500; // Number of UDP frames per segment
 
 type Frame = Vec<u8>; // Alias for a single frame
 type Segment = Vec<Frame>; // Alias for a segment (group of frames)
+
+#[derive(Parser)]
+struct Args {
+    /// The value to be shown when using --showme
+    #[arg(long, short, default_value_t = 0)]
+    verbose: u8,
+    #[arg(long)]
+    port: Option<u16>,
+    #[arg(long)]
+    address: Option<IpAddr>,
+    #[arg(long)]
+    interface: Option<String>,
+}
 
 /// Extracts the UDP payload from a raw Ethernet packet
 fn extract_udp_payload(data: &[u8]) -> Option<&[u8]> {
@@ -41,8 +56,47 @@ fn extract_udp_payload(data: &[u8]) -> Option<&[u8]> {
     Some(&data[udp_payload_start..])
 }
 
+fn usage()
+{
+    println!("Usage");
+    println!("  --address   227.1.1.1");
+    println!("  --port      4001");
+    println!("  --interface eno2");
+}
+
 #[tokio::main]
 async fn main() {
+
+    let args = Args::parse();
+    let num_args = std::env::args().count() - 1;
+
+    if num_args == 0 {
+        usage();
+        return;
+    }
+    
+    if let Some(address) = args.address {
+        println!("  address: {}", address);
+    } else {
+        println!("No value provided for --address.");
+        return;
+    }
+    if let Some(port) = args.port {
+        println!("     port: {}", port);
+    } else {
+        println!("No value provided for --port.");
+        return;
+    }
+    let interface_name = args.interface.unwrap_or_else(|| {
+        eprintln!("No value provided for --interface");
+        std::process::exit(1);
+    });
+    println!("interface: {}", interface_name);
+
+    if args.verbose > 0 {
+        println!("verbose enabled");
+    }
+
     // Shared queue for storing received frames
     let queue = Arc::new(SegQueue::new());
 
@@ -60,9 +114,11 @@ async fn main() {
         &secret_key, 
         None, // session token
         None, // expires after
-	"ltn" // provider name
+	    "ltn" // provider name
     );
-    //println!("credentials: {:?}", credentials);
+    if args.verbose > 1 {
+        println!("credentials: {:?}", credentials);
+    }
 
     // Initialize AWS SDK S3 client
     let config = Config::builder()
@@ -70,23 +126,31 @@ async fn main() {
         .endpoint_url(minio_endpoint)
         .credentials_provider(credentials)
         .build();
-    //println!("config: {:?}", config);
+    if args.verbose > 1 {
+        println!("config: {:?}", config);
+    }
 
     let s3_client = Client::from_conf(config);
-    //println!("s3_client: {:?}", s3_client);
+    if args.verbose > 1 {
+        println!("s3_client: {:?}", s3_client);
+    }
 
     // Spawn a thread for capturing UDP frames
     let capture_thread = thread::spawn(move || {
+
         // Open the default network device
-        let mut cap = Capture::from_device("eno2")
+        let mut cap = Capture::from_device(interface_name.as_str())
             .expect("Failed to open device")
             .promisc(true)
             .timeout(1000)
             .open()
             .expect("Failed to open capture");
 
-        let filter = "host 227.1.20.90 && port 4010";
-        cap.filter(filter, true).expect("Error setting filter");
+        let filter = format!("host {} && port {}",
+            args.address.unwrap_or(IpAddr::V4("0.0.0.0".parse().unwrap())),
+            args.port.unwrap());
+
+        cap.filter(&filter, true).expect("Error setting filter");
 
         while let Ok(packet) = cap.next_packet() {
             let data = packet.data;
@@ -158,7 +222,11 @@ async fn main() {
                         .send()
                         .await
                     {
-                        Ok(_) => println!("{:?} - Uploaded segment to S3: {}, size {:?}", now, key, blen),
+                        Ok(_) => {
+                            if args.verbose > 0 {
+                                println!("{:?} - Uploaded segment to S3: {}, size {:?}", now, key, blen);
+                            }
+                        },
                         Err(e) => eprintln!("{:?} - Failed to upload segment to S3: {}", now, e),
                     }
 

@@ -159,7 +159,7 @@ async fn main() {
                         .await
                     {
                         Ok(_) => println!("{:?} - Uploaded segment to S3: {}, size {:?}", now, key, blen),
-                        Err(e) => eprintln!("Failed to upload segment to S3: {}", e),
+                        Err(e) => eprintln!("{:?} - Failed to upload segment to S3: {}", now, e),
                     }
 
                     segment.clear(); // Clear the segment after upload

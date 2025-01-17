@@ -143,7 +143,8 @@ async fn main() {
                         }
                     }
                     let body = segment.concat(); // Flatten segment into a single byte vector
-                    let key = format!("segment-{}.bin, size {:?}", ms, body.len());
+                    let key = format!("segment-{}.bin", ms);
+                    let blen = body.len();
 
                     //println!("Captured body: {:?}", body);
                     match s3_client
@@ -154,7 +155,7 @@ async fn main() {
                         .send()
                         .await
                     {
-                        Ok(_) => println!("Uploaded segment to S3: {}", key),
+                        Ok(_) => println!("Uploaded segment to S3: {}, size {:?}", key, blen),
                         Err(e) => eprintln!("Failed to upload segment to S3: {}", e),
                     }
 

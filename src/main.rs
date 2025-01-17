@@ -5,12 +5,13 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH, Duration};
 use std::env;
 use chrono::Local;
+use aws_sdk_s3;
 use aws_sdk_s3::{Client, Config};
 use aws_sdk_s3::primitives::ByteStream;
-use aws_sdk_s3;
 use aws_sdk_s3::config::{Region, Credentials};
 use clap::Parser;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
+use std::str::FromStr;
 
 const SEGMENT_SIZE: usize = 500; // Number of UDP frames per segment
 
@@ -20,14 +21,35 @@ type Segment = Vec<Frame>; // Alias for a segment (group of frames)
 #[derive(Parser)]
 struct Args {
     /// The value to be shown when using --showme
-    #[arg(long, short, default_value_t = 0)]
+    #[arg(long, short, default_value_t = 1)]
     verbose: u8,
     #[arg(long)]
-    port: Option<u16>,
-    #[arg(long)]
-    address: Option<IpAddr>,
-    #[arg(long)]
     interface: Option<String>,
+    #[arg(long)]
+    input: Option<String>,
+}
+
+fn parse_udp_url(url: &str) -> Result<(IpAddr, u16), &'static str> {
+    // Check if the URL starts with 'udp://'
+    if !url.starts_with("udp://") {
+        return Err("URL must start with 'udp://'");
+    }
+
+    // Remove the 'udp://' prefix
+    let url = &url[6..];
+
+    // Split the remaining string at the colon to get the IP address and port
+    let mut parts = url.split(':');
+    let ip_str = parts.next().ok_or("No IP address found")?;
+    let port_str = parts.next().ok_or("No port found")?;
+
+    // Parse the IP address
+    let ip = IpAddr::from_str(ip_str).map_err(|_| "Invalid IP address")?;
+
+    // Parse the port
+    let port = port_str.parse::<u16>().map_err(|_| "Invalid port")?;
+
+    Ok((ip, port))
 }
 
 /// Extracts the UDP payload from a raw Ethernet packet
@@ -59,9 +81,9 @@ fn extract_udp_payload(data: &[u8]) -> Option<&[u8]> {
 fn usage()
 {
     println!("Usage");
-    println!("  --address   227.1.1.1");
-    println!("  --port      4001");
+    println!("  --input     udp://227.1.1.:4001");
     println!("  --interface eno2");
+    println!("  --verbose   <level 0..9>");
 }
 
 #[tokio::main]
@@ -75,26 +97,32 @@ async fn main() {
         return;
     }
     
-    if let Some(address) = args.address {
-        println!("  address: {}", address);
-    } else {
-        println!("No value provided for --address.");
-        return;
-    }
-    if let Some(port) = args.port {
-        println!("     port: {}", port);
-    } else {
-        println!("No value provided for --port.");
-        return;
-    }
     let interface_name = args.interface.unwrap_or_else(|| {
         eprintln!("No value provided for --interface");
         std::process::exit(1);
     });
     println!("interface: {}", interface_name);
 
+    let url = args.input.unwrap_or_else(|| {
+        eprintln!("No value provided for --input");
+        std::process::exit(1);
+    });
+
+    let mut ip: IpAddr = IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0));
+    let mut port: u16 = 0;
+    match parse_udp_url(&url) {
+        Ok((a_ip, a_port)) => {
+            println!("IP Address: {}, Port: {}", a_ip, a_port);
+            ip = a_ip;   // Assign the parsed IP
+            port = a_port; // Assign the parsed port
+        }
+        Err(e) => {
+            println!("Error: {}", e);
+        }
+    }
+
     if args.verbose > 0 {
-        println!("verbose enabled");
+        println!("verbose enabled, ip {} port {}", ip, port);
     }
 
     // Shared queue for storing received frames
@@ -146,9 +174,7 @@ async fn main() {
             .open()
             .expect("Failed to open capture");
 
-        let filter = format!("host {} && port {}",
-            args.address.unwrap_or(IpAddr::V4("0.0.0.0".parse().unwrap())),
-            args.port.unwrap());
+        let filter = format!("host {} && port {}", ip, port);
 
         cap.filter(&filter, true).expect("Error setting filter");
 

@@ -2,18 +2,43 @@ use crossbeam_queue::SegQueue;
 use pcap::{Capture};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH, Duration};
 use std::env;
 use aws_sdk_s3::{Client, Config};
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3;
 use aws_sdk_s3::config::{Region, Credentials};
 
-const SEGMENT_SIZE: usize = 10; // Number of UDP frames per segment
-const UPLOAD_INTERVAL: Duration = Duration::from_secs(5); // Interval between uploads
+const SEGMENT_SIZE: usize = 500; // Number of UDP frames per segment
 
 type Frame = Vec<u8>; // Alias for a single frame
 type Segment = Vec<Frame>; // Alias for a segment (group of frames)
+
+/// Extracts the UDP payload from a raw Ethernet packet
+fn extract_udp_payload(data: &[u8]) -> Option<&[u8]> {
+    if data.len() < 42 {
+        return None; // Not large enough to contain Ethernet + IP + UDP headers
+    }
+
+    let ethertype = u16::from_be_bytes([data[12], data[13]]);
+    if ethertype != 0x0800 {
+        return None; // Not an IPv4 packet
+    }
+
+    let ip_header_length = (data[14] & 0x0F) as usize * 4;
+    if data.len() < 14 + ip_header_length + 8 {
+        return None; // Not large enough to contain IP + UDP headers
+    }
+
+    let protocol = data[23];
+    if protocol != 17 {
+        return None; // Not a UDP packet
+    }
+
+    let udp_header_start = 14 + ip_header_length;
+    let udp_payload_start = udp_header_start + 8;
+    Some(&data[udp_payload_start..])
+}
 
 #[tokio::main]
 async fn main() {
@@ -63,9 +88,13 @@ async fn main() {
         cap.filter(filter, true).expect("Error setting filter");
 
         while let Ok(packet) = cap.next_packet() {
-            let data = packet.data.to_vec(); // Convert packet data to a vector
-            //println!("Captured packet: {:?}", data);
-            queue_receiver.push(data); // Push the frame onto the queue
+            let data = packet.data;
+            if let Some(udp_payload) = extract_udp_payload(data) {
+                if udp_payload.len() != (7 * 188) {
+                    println!("Captured TS packet len: {:?}, not 7 * 188, warning", udp_payload.len());
+                }
+                queue_receiver.push(udp_payload.to_vec()); // Push the frame onto the queue
+            }
         }
     });
 
@@ -80,18 +109,43 @@ async fn main() {
 
             loop {
                 // Collect frames into a segment
+                //println!("queue_sender size: {:?}", queue_sender.len());
+
+                // Hold 3000 UDP frames until we process, ~394KB (3Mb)
+                if queue_sender.len() < 300 {
+                    thread::sleep(Duration::from_millis(250));
+                    continue;    
+                }
+
                 while let Some(frame) = queue_sender.pop() {
                     segment.push(frame);
                     if segment.len() >= SEGMENT_SIZE {
                         break;
                     }
                 }
+                if segment.len() < SEGMENT_SIZE {
+                    continue;
+                }
 
                 // If there are frames in the segment, upload it
                 if !segment.is_empty() {
-                    let key = format!("segment-{}.bin", chrono::Utc::now().timestamp());
-                    let body = segment.concat(); // Flatten segment into a single byte vector
 
+                    //println!("sending segment len: {:?}", segment.len());
+
+                    let start = SystemTime::now();
+                    let mut ms = 0;
+                    match start.duration_since(UNIX_EPOCH) {
+                        Ok(duration) => {
+                            ms = duration.as_millis();
+                        }
+                        Err(e) => {
+                            println!("Error: {:?}", e);
+                        }
+                    }
+                    let body = segment.concat(); // Flatten segment into a single byte vector
+                    let key = format!("segment-{}.bin, size {:?}", ms, body.len());
+
+                    //println!("Captured body: {:?}", body);
                     match s3_client
                         .put_object()
                         .bucket(&bucket_name)
@@ -106,9 +160,6 @@ async fn main() {
 
                     segment.clear(); // Clear the segment after upload
                 }
-
-                // Wait for the next upload interval
-                thread::sleep(UPLOAD_INTERVAL);
             }
         });
     });

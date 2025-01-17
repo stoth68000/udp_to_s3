@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH, Duration};
 use std::env;
+use chrono::Local;
 use aws_sdk_s3::{Client, Config};
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3;
@@ -146,6 +147,8 @@ async fn main() {
                     let key = format!("segment-{}.bin", ms);
                     let blen = body.len();
 
+                    let now = Local::now();
+
                     //println!("Captured body: {:?}", body);
                     match s3_client
                         .put_object()
@@ -155,7 +158,7 @@ async fn main() {
                         .send()
                         .await
                     {
-                        Ok(_) => println!("Uploaded segment to S3: {}, size {:?}", key, blen),
+                        Ok(_) => println!("{:?} - Uploaded segment to S3: {}, size {:?}", now, key, blen),
                         Err(e) => eprintln!("Failed to upload segment to S3: {}", e),
                     }
 
